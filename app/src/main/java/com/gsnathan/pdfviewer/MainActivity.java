@@ -25,31 +25,26 @@
 package com.gsnathan.pdfviewer;
 
 import android.Manifest;
-import android.annotation.SuppressLint;
+import android.app.Dialog;
 import android.content.ActivityNotFoundException;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Color;
-import android.graphics.PorterDuff;
-import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Environment;
-import android.os.Handler;
 import android.os.StrictMode;
 import android.preference.PreferenceManager;
-import android.print.PrintAttributes;
-import android.print.PrintDocumentAdapter;
-import android.print.PrintJob;
 import android.print.PrintManager;
 import android.provider.OpenableColumns;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.fragment.app.DialogFragment;
 
 import android.os.Bundle;
 
@@ -57,17 +52,19 @@ import android.text.InputType;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.MotionEvent;
+import android.view.View;
 import android.widget.EditText;
+import android.widget.ProgressBar;
 import android.widget.Toast;
 
 import com.github.barteksc.pdfviewer.PDFView;
-import com.github.barteksc.pdfviewer.listener.OnLoadCompleteListener;
-import com.github.barteksc.pdfviewer.listener.OnPageChangeListener;
-import com.github.barteksc.pdfviewer.listener.OnPageErrorListener;
 import com.github.barteksc.pdfviewer.scroll.DefaultScrollHandle;
 import com.github.barteksc.pdfviewer.util.Constants;
 import com.github.barteksc.pdfviewer.util.FitPolicy;
 import com.google.android.material.bottomnavigation.BottomNavigationView;
+import com.google.android.material.shape.MaterialShapeDrawable;
+import com.jaredrummler.cyanea.app.CyaneaAppCompatActivity;
 import com.jaredrummler.cyanea.prefs.CyaneaSettingsActivity;
 import com.kobakei.ratethisapp.RateThisApp;
 import com.shockwave.pdfium.PdfDocument;
@@ -77,36 +74,31 @@ import org.androidannotations.annotations.EActivity;
 import org.androidannotations.annotations.NonConfigurationInstance;
 import org.androidannotations.annotations.OnActivityResult;
 import org.androidannotations.annotations.ViewById;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.Arrays;
-import java.util.List;
 
 @EActivity(R.layout.activity_main)
-public class MainActivity extends ProgressActivity implements OnPageChangeListener, OnLoadCompleteListener,
-        OnPageErrorListener {
+public class MainActivity extends CyaneaAppCompatActivity {
 
     private static final String TAG = MainActivity.class.getSimpleName();
 
     private PrintManager mgr = null;
 
     private final static int REQUEST_CODE = 42;
-
-    public static final int PERMISSION_WRITE = 42041;
-    public static final int PERMISSION_READ = 42042;
+    private final static int PERMISSION_WRITE = 42041;
 
     private static String PDF_PASSWORD = "";
     private SharedPreferences prefManager;
 
-    @ViewById
-    PDFView pdfView;
+    private boolean isBottomNavigationHidden = false;
 
-    @SuppressLint("ClickableViewAccessibility")
+    @ViewById PDFView pdfView;
+    @ViewById BottomNavigationView bottomNavigation;
+    @ViewById ProgressBar progressBar;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -118,9 +110,7 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
         onFirstUpdate();
         handleIntent(getIntent());
 
-        if (Utils.tempBool && getIntent().getStringExtra("uri") != null) {
-            uri = Uri.parse(getIntent().getStringExtra("uri"));
-        } else if (getIntent().getDataString() == null){
+        if (uri == null) {
             pickFile();
         }
 
@@ -167,45 +157,27 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
         StrictMode.setVmPolicy(builder.build());
 
         Uri appLinkData = intent.getData();
-        String appLinkAction = intent.getAction();
-        if (Intent.ACTION_VIEW.equals(appLinkAction) && appLinkData != null) {
+        if (appLinkData != null) {
             uri = appLinkData;
         }
     }
 
     @NonConfigurationInstance
-    static Uri uri;
+    Uri uri;
 
     @NonConfigurationInstance
     Integer pageNumber = 0;
 
-    String pdfFileName;
+    private String pdfFileName;
 
-    String pdfTempFilePath;
-
-    private void pickFile() {
-        int permissionCheck = ContextCompat.checkSelfPermission(this,
-                Manifest.permission.READ_EXTERNAL_STORAGE);
-
-        if (permissionCheck != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(
-                    this,
-                    new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
-                    PERMISSION_READ
-            );
-
-            return;
-        }
-
-        launchPicker();
-    }
+    private byte[] downloadedPdfFileContent;
 
     void shareFile() {
         startActivity(Utils.emailIntent(pdfFileName, "", getResources().getString(R.string.share), uri));
     }
 
-    void launchPicker() {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+    private void pickFile() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.setType("application/pdf");
         try {
             startActivityForResult(intent, REQUEST_CODE);
@@ -215,52 +187,62 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
         }
     }
 
-    private Handler handler = new Handler();
-
-    private Runnable runnable = new Runnable() {
-        @Override
-        public void run() {
-            if(pdfView != null) {
-                if (pdfView.isZooming())
-                    hideBottomNavigationView((BottomNavigationView) findViewById(R.id.bottom_navigation));
-                else {
-                    showBottomNavigationView((BottomNavigationView) findViewById(R.id.bottom_navigation));
-                }
-            }
-            handler.postDelayed(runnable, 500);
-        }
-    };
-
     @AfterViews
     void afterViews() {
-        showProgressDialog();
         pdfView.setBackgroundColor(Color.LTGRAY);
         Constants.THUMBNAIL_RATIO = 1f;
         if (uri != null) {
             displayFromUri(uri);
         }
         setTitle(pdfFileName);
-        hideProgressDialog();
-        handler.post(runnable);
+        setBottomBarListeners();
     }
 
-    void setPdfViewConfiguration() {
+    private void setBottomBarListeners() {
+        bottomNavigation.setOnNavigationItemSelectedListener(item -> {
+            switch (item.getItemId()) {
+                case R.id.pickFile:
+                    pickFile();
+                    break;
+                case R.id.metaFile:
+                    if (uri != null)
+                        showPdfMetaDialog();
+                    break;
+                case R.id.unlockFile:
+                    if (uri != null)
+                        unlockPDF();
+                    break;
+                case R.id.shareFile:
+                    if (uri != null)
+                        shareFile();
+                    break;
+                case R.id.printFile:
+                    if (uri != null)
+                        printDocument();
+                    break;
+                default:
+                    break;
+            }
+            return false;
+        });
+    }
+
+    void configurePdfViewAndLoad(PDFView.Configurator viewConfigurator) {
         pdfView.useBestQuality(prefManager.getBoolean("quality_pref", false));
+        pdfView.setMinZoom(0.5f);
         pdfView.setMidZoom(2.0f);
         pdfView.setMaxZoom(5.0f);
-    }
-
-    void setPageConfigurationAndLoad(PDFView.Configurator configurator) {
-        configurator
+        viewConfigurator
                 .defaultPage(pageNumber)
-                .onPageChange(this)
+                .onPageChange(this::setCurrentPage)
                 .enableAnnotationRendering(true)
-                .enableAntialiasing(prefManager.getBoolean("alias_pref", false))
-                .onLoad(this)
+                .enableAntialiasing(prefManager.getBoolean("alias_pref", true))
+                .onTap(this::toggleBottomNavigationVisibility)
+                .onPageScroll(this::toggleBottomNavigationAccordingToPosition)
                 .scrollHandle(new DefaultScrollHandle(this))
                 .spacing(10) // in dp
-                .onPageError(this)
-                .pageFitPolicy(FitPolicy.BOTH)
+                .onPageError((page, err) -> Log.e(TAG, "Cannot load page " + page, err))
+                .pageFitPolicy(FitPolicy.WIDTH)
                 .password(PDF_PASSWORD)
                 .swipeHorizontal(prefManager.getBoolean("scroll_pref", false))
                 .autoSpacing(prefManager.getBoolean("scroll_pref", false))
@@ -269,71 +251,86 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
                 .load();
     }
 
+    private void toggleBottomNavigationAccordingToPosition(int page, float positionOffset) {
+        if (positionOffset == 0) {
+            showBottomNavigationView();
+        } else if (!isBottomNavigationHidden) {
+            hideBottomNavigationView();
+        }
+    }
+
+    private boolean toggleBottomNavigationVisibility(MotionEvent e) {
+        if (isBottomNavigationHidden) {
+            showBottomNavigationView();
+        } else {
+            hideBottomNavigationView();
+        }
+        return true;
+    }
+
+    private void hideBottomNavigationView() {
+        isBottomNavigationHidden = true;
+        bottomNavigation.animate().translationY(bottomNavigation.getHeight()).setDuration(100);
+    }
+
+    private void showBottomNavigationView() {
+        isBottomNavigationHidden = false;
+        bottomNavigation.animate().translationY(0).setDuration(100);
+    }
+
     void displayFromUri(Uri uri) {
         pdfFileName = getFileName(uri);
-        Utils.tempBool = true;
-        SharedPreferences.Editor editor = prefManager.edit();
-        editor.putString("uri", uri.toString());
-        editor.apply();
         String scheme = uri.getScheme();
 
         if (scheme != null && scheme.contains("http")) {
             // we will get the pdf asynchronously with the DownloadPDFFile object
-            DownloadPDFFile DownloadPDFFile = new DownloadPDFFile(this);
-            DownloadPDFFile.execute(uri.toString(), pdfFileName);
+            progressBar.setVisibility(View.VISIBLE);
+            DownloadPDFFile downloadPDFFile = new DownloadPDFFile(this);
+            downloadPDFFile.execute(uri.toString());
         } else {
-            setPdfViewConfiguration();
-            setPageConfigurationAndLoad(pdfView.fromUri(uri));
+            configurePdfViewAndLoad(pdfView.fromUri(uri));
         }
     }
 
-    void displayFromFile(File file) {
-        setPdfViewConfiguration();
-        setPageConfigurationAndLoad(pdfView.fromFile(file));
+    public void hideProgressBar() {
+        progressBar.setVisibility(View.GONE);
     }
 
-    public void saveFileAndDisplay(File file) {
-        String filePath = saveTempFileToFile(file);
-        File newFile = new File(filePath);
-        displayFromFile(newFile);
+    void saveToFileAndDisplay(byte[] pdfFileContent) {
+        downloadedPdfFileContent = pdfFileContent;
+        saveToDownloadFolderIfAllowed(pdfFileContent);
+        configurePdfViewAndLoad(pdfView.fromBytes(pdfFileContent));
     }
 
-    String saveTempFileToFile(File tempFile) {
+    private void saveToDownloadFolderIfAllowed(byte[] fileContent) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
+            trySaveToDownloadFolder(fileContent, false);
+        } else {
+            ActivityCompat.requestPermissions(
+                    this,
+                    new String[] { Manifest.permission.WRITE_EXTERNAL_STORAGE },
+                    PERMISSION_WRITE
+            );
+        }
+    }
+
+    private void trySaveToDownloadFolder(byte[] fileContent, boolean showSuccessMessage) {
         try {
-            // check if the permission to write to external storage is granted
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
-                InputStream inputStream = new FileInputStream(tempFile);
-                File newFile = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), pdfFileName);
-                OutputStream outputStream = new FileOutputStream(newFile);
-                Utils.readFromInputStreamToOutputStream(inputStream, outputStream);
-
-                return tempFile.getPath();
-            } else {
-                // case if the permission hasn't been granted, we will store the pdf in a temp file
-                //store the temporary file path, to be able to save it when permission will be granted
-
-
-                // request for the permission to write to external storage
-                ActivityCompat.requestPermissions(
-                        this,
-                        new String[]{
-                                Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                                Manifest.permission.READ_EXTERNAL_STORAGE
-                        },
-                        PERMISSION_WRITE
-                );
-                return pdfTempFilePath;
+            File downloadDirectory = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            Utils.writeBytesToFile(downloadDirectory, pdfFileName, fileContent);
+            if (showSuccessMessage) {
+                Toast.makeText(this, R.string.saved_to_download, Toast.LENGTH_SHORT).show();
             }
         } catch (IOException e) {
-            Log.e(TAG, "Error on file : " + e.getMessage());
-            e.printStackTrace();
+            Log.e(TAG, "Error while saving file to download folder", e);
+            Toast.makeText(this, R.string.save_to_download_failed, Toast.LENGTH_SHORT).show();
         }
-
-        return null;
     }
 
     void navToSettings() {
-        startActivity(Utils.navIntent(this, SettingsActivity.class));
+        Intent intent = new Intent(this, SettingsActivity.class);
+        intent.setData(uri);
+        startActivity(intent);
     }
 
     @OnActivityResult(REQUEST_CODE)
@@ -344,8 +341,7 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
         }
     }
 
-    @Override
-    public void onPageChanged(int page, int pageCount) {
+    private void setCurrentPage(int page, int pageCount) {
         pageNumber = page;
         setTitle(String.format("%s %s / %s", pdfFileName + " ", page + 1, pageCount));
     }
@@ -353,17 +349,12 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
     public String getFileName(Uri uri) {
         String result = null;
         if (uri.getScheme() != null && uri.getScheme().equals("content")) {
-            Cursor cursor = getContentResolver().query(uri, null, null, null, null);
-            try {
+            try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
                 if (cursor != null && cursor.moveToFirst()) {
                     int indexDisplayName = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
                     if (indexDisplayName != -1) {
                         result = cursor.getString(indexDisplayName);
                     }
-                }
-            } finally {
-                if (cursor != null) {
-                    cursor.close();
                 }
             }
         }
@@ -373,17 +364,8 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
         return result;
     }
 
-    @Override
-    public void loadComplete(int nbPages) {
-        Log.d(TAG, "PDF loaded");
-
-    }
-
-    private PrintJob print(String name, PrintDocumentAdapter adapter,
-                           PrintAttributes attrs) {
-        startService(new Intent(this, PrintJobMonitorService.class));
-
-        return (mgr.print(name, adapter, attrs));
+    private void printDocument() {
+        mgr.print(pdfFileName, new PdfDocumentAdapter(this, uri), null);
     }
 
     void unlockPDF() {
@@ -395,119 +377,49 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
         new AlertDialog.Builder(this)
                 .setTitle(R.string.password)
                 .setView(input)
-                .setPositiveButton(R.string.ok, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        PDF_PASSWORD = input.getText().toString();
-                        if (uri != null)
-                            displayFromUri(uri);
-                    }
+                .setPositiveButton(R.string.ok, (dialog, which) -> {
+                    PDF_PASSWORD = input.getText().toString();
+                    if (uri != null)
+                        displayFromUri(uri);
                 })
                 .setIcon(R.drawable.lock_icon)
                 .show();
     }
 
-    void getMeta() {
+    void showPdfMetaDialog() {
         PdfDocument.Meta meta = pdfView.getDocumentMeta();
         if (meta != null) {
-            AlertDialog.Builder builder = new AlertDialog.Builder(this);
-            builder.setTitle(R.string.meta)
-                    .setMessage("Title: " + meta.getTitle() + "\n" + "Author: " + meta.getAuthor() + "\n" + "Creation Date: " + meta.getCreationDate())
-                    .setPositiveButton(R.string.ok, new DialogInterface.OnClickListener() {
-                        public void onClick(DialogInterface dialog, int which) {
-                        }
-                    })
-                    .setIcon(R.drawable.alert_icon)
-                    .show();
-        }
-
-    }
-
-    public void printBookmarksTree(List<PdfDocument.Bookmark> tree, String sep) {
-        for (PdfDocument.Bookmark b : tree) {
-
-            Log.e(TAG, String.format("%s %s, p %d", sep, b.getTitle(), b.getPageIdx()));
-
-            if (b.hasChildren()) {
-                printBookmarksTree(b.getChildren(), sep + "-");
-            }
+            Bundle dialogArgs = new Bundle();
+            dialogArgs.putString(PdfMetaDialog.TITLE_ARGUMENT, meta.getTitle());
+            dialogArgs.putString(PdfMetaDialog.AUTHOR_ARGUMENT, meta.getAuthor());
+            dialogArgs.putString(PdfMetaDialog.CREATION_DATE_ARGUMENT, meta.getCreationDate());
+            DialogFragment dialog = new PdfMetaDialog();
+            dialog.setArguments(dialogArgs);
+            dialog.show(getSupportFragmentManager(), "meta_dialog");
         }
     }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
                                            @NonNull int[] grantResults) {
-        int indexPermission;
+        if (grantResults.length == 0) {
+            return;
+        }
         switch (requestCode) {
-            case PERMISSION_READ:
-                indexPermission = Arrays.asList(permissions).indexOf(Manifest.permission.READ_EXTERNAL_STORAGE);
-                if (indexPermission != -1 && grantResults[indexPermission] == PackageManager.PERMISSION_GRANTED) {
-                    launchPicker();
-                }
-                break;
             case PERMISSION_WRITE:
-                indexPermission = Arrays.asList(permissions).indexOf(Manifest.permission.WRITE_EXTERNAL_STORAGE);
-                if (indexPermission != -1 && grantResults[indexPermission] == PackageManager.PERMISSION_GRANTED) {
-                    File file = new File(pdfTempFilePath);
-                    saveTempFileToFile(file);
+                int indexPermission = Arrays.asList(permissions).indexOf(Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                if (grantResults[indexPermission] == PackageManager.PERMISSION_GRANTED) {
+                    trySaveToDownloadFolder(downloadedPdfFileContent, true);
+                } else {
+                    Toast.makeText(this, R.string.save_to_download_failed, Toast.LENGTH_SHORT).show();
                 }
                 break;
         }
     }
 
     @Override
-    public void onPageError(int page, Throwable t) {
-        Log.e(TAG, "Cannot load page " + page);
-    }
-
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu) {
+    public boolean onCreateOptionsMenu(@NotNull Menu menu) {
         getMenuInflater().inflate(R.menu.menu, menu);
-
-        BottomNavigationView bot_view = (BottomNavigationView) findViewById(R.id.bottom_navigation);
-        Menu bottomMenu = bot_view.getMenu();
-
-        for (int i = 0; i < bottomMenu.size() - 1; i++) {
-            Drawable drawable = bottomMenu.getItem(i).getIcon();
-            if (drawable != null) {
-                drawable.mutate();
-                drawable.setColorFilter(getResources().getColor(R.color.colorWhite), PorterDuff.Mode.SRC_ATOP);
-            }
-        }
-        bot_view.setOnNavigationItemSelectedListener(new BottomNavigationView.OnNavigationItemSelectedListener() {
-            @Override
-            public boolean onNavigationItemSelected(@NonNull MenuItem item) {
-
-                switch (item.getItemId()) {
-                    case R.id.pickFile:
-                        pickFile();
-                        break;
-                    case R.id.metaFile:
-                        if (uri != null)
-                            getMeta();
-                        break;
-                    case R.id.unlockFile:
-                        if (uri != null)
-                            unlockPDF();
-                        break;
-                    case R.id.shareFile:
-                        if (uri != null)
-                            shareFile();
-                        break;
-                    case R.id.printFile:
-                        if (uri != null)
-                            print(pdfFileName,
-                                    new PdfDocumentAdapter(getApplicationContext()),
-                                    new PrintAttributes.Builder().build());
-                        break;
-                    default:
-                        break;
-
-                }
-
-                return false;
-            }
-        });
         return true;
     }
 
@@ -528,18 +440,24 @@ public class MainActivity extends ProgressActivity implements OnPageChangeListen
         }
     }
 
-    private void hideBottomNavigationView(BottomNavigationView view) {
-        //getSupportActionBar().hide();
-        view.clearAnimation();
-        view.animate().translationY(view.getHeight()).setDuration(100);
+    public static class PdfMetaDialog extends DialogFragment {
 
-    }
+        public static final String TITLE_ARGUMENT = "title";
+        public static final String AUTHOR_ARGUMENT = "author";
+        public static final String CREATION_DATE_ARGUMENT = "creation_date";
 
-    public void showBottomNavigationView(BottomNavigationView view) {
-        //getSupportActionBar().show();
-        view.clearAnimation();
-        view.animate().translationY(0).setDuration(100);
-
+        @NonNull
+        @Override
+        public Dialog onCreateDialog(@Nullable Bundle savedInstanceState) {
+            AlertDialog.Builder builder = new AlertDialog.Builder(requireContext());
+            return builder.setTitle(R.string.meta)
+                    .setMessage(getString(R.string.pdf_title, getArguments().getString(TITLE_ARGUMENT)) + "\n" +
+                            getString(R.string.pdf_author, getArguments().getString(AUTHOR_ARGUMENT)) + "\n" +
+                            getString(R.string.pdf_creation_date, getArguments().getString(CREATION_DATE_ARGUMENT)))
+                    .setPositiveButton(R.string.ok, (dialog, which) -> {})
+                    .setIcon(R.drawable.alert_icon)
+                    .create();
+        }
     }
 }
 
